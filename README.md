@@ -852,5 +852,5 @@ Ce projet est distribué sous la licence **Apache&nbsp;2.0** — voir [LICENSE](
 ## Copyright / Droit d'auteur
 
 ```text
-Copyright (c) 2025 Sam Tech Lab
+Copyright (c) 2026 Sam Tech Lab
 ```
