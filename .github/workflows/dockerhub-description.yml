@@ -1,0 +1,98 @@
+name: Sync description Docker Hub
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'README-dockerhub.md'
+  workflow_dispatch:
+
+concurrency:
+  group: dockerhub-description
+  cancel-in-progress: true
+
+env:
+  DOCKERHUB_REPO: samtechlab/alpine-3.24
+
+jobs:
+  sync:
+    name: Publier la description
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Les identifiants Docker Hub sont-ils disponibles ?
+        id: dockerhub
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [ -n "${DOCKERHUB_USERNAME}" ] && [ -n "${DOCKERHUB_TOKEN}" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Secrets Docker Hub absents, synchronisation ignorée."
+          fi
+
+      - name: La description tient sous la limite
+        run: |
+          LIMIT=25000
+          SIZE=$(wc -c < README-dockerhub.md)
+          echo "README-dockerhub.md : ${SIZE} octets (limite ${LIMIT})"
+          if [ "${SIZE}" -gt "${LIMIT}" ]; then
+            echo "::error::README-dockerhub.md dépasse la limite Docker Hub de $((SIZE - LIMIT)) octets."
+            exit 1
+          fi
+
+      - name: Le dépôt Docker Hub existe-t-il déjà ?
+        id: hub
+        if: steps.dockerhub.outputs.available == 'true'
+        run: |
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 40 \
+            "https://hub.docker.com/v2/repositories/${DOCKERHUB_REPO}/")
+          case "${CODE}" in
+            200)
+              echo "exists=true" >> "$GITHUB_OUTPUT"
+              ;;
+            404)
+              echo "exists=false" >> "$GITHUB_OUTPUT"
+              echo "::notice::${DOCKERHUB_REPO} n'existe pas encore sur Docker Hub — un dépôt y est créé au premier push d'image. Synchronisation reportée."
+              ;;
+            *)
+              echo "::error::Docker Hub a répondu ${CODE} pour ${DOCKERHUB_REPO}."
+              exit 1
+              ;;
+          esac
+
+      - name: Sync README to Docker Hub
+        if: steps.dockerhub.outputs.available == 'true' && steps.hub.outputs.exists == 'true'
+        uses: peter-evans/dockerhub-description@1b9a80c056b620d92cedb9d9b5a223409c68ddfa # v5.0.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: ${{ env.DOCKERHUB_REPO }}
+          readme-filepath: ./README-dockerhub.md
+
+      - name: Vérifier que la description en ligne correspond au fichier
+        if: steps.dockerhub.outputs.available == 'true' && steps.hub.outputs.exists == 'true'
+        run: |
+          sleep 5
+          EN_LIGNE=$(curl -fsSL --max-time 40 \
+            "https://hub.docker.com/v2/repositories/${DOCKERHUB_REPO}/" \
+            | jq -r '.full_description // ""' | wc -c)
+          LOCAL=$(wc -c < README-dockerhub.md)
+          echo "publiée : ${EN_LIGNE} octets | fichier : ${LOCAL} octets"
+          # `jq -r` ajoute un saut de ligne final que wc compte : on tolère
+          # un octet d'écart plutôt que de comparer des chaînes entières.
+          DIFF=$(( EN_LIGNE > LOCAL ? EN_LIGNE - LOCAL : LOCAL - EN_LIGNE ))
+          if [ "${DIFF}" -gt 1 ]; then
+            echo "::error::La description en ligne ne correspond pas au fichier (écart de ${DIFF} octets)."
+            exit 1
+          fi
+          echo "Description à jour sur Docker Hub."
