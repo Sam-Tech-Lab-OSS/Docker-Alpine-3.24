@@ -1,0 +1,72 @@
+name: Bug / Problème
+description: Signaler un comportement inattendu de l'image ou de la CI
+title: "[bug] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Merci de votre signalement. Pour une **vulnérabilité de sécurité**,
+        n'utilisez pas ce formulaire — voir le lien de signalement privé.
+
+        Thanks for reporting. For a **security vulnerability**, do not use
+        this form — see the private reporting link instead.
+
+  - type: dropdown
+    id: zone
+    attributes:
+      label: Fichier ou zone concernée / Affected area
+      options:
+        - Dockerfile-multi-arch
+        - .github/workflows/ (CI)
+        - Documentation (README, SECURITY, CONTRIBUTING)
+        - Autre / Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: probleme
+    attributes:
+      label: Problème / Problem
+      description: Ce qui se produit, et ce que vous attendiez à la place.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: >-
+        La sortie `docker build` ou `docker run` qui montre le problème.
+        Collez-la telle quelle, elle sera formatée automatiquement.
+      render: shell
+
+  - type: input
+    id: image
+    attributes:
+      label: Image utilisée / Image used
+      description: >-
+        Tag ou digest. Le digest est préférable — les tags `latest` et
+        `YYYY.MM` sont republiés.
+      placeholder: "ghcr.io/sam-tech-lab-oss/alpine-3.24@sha256:..."
+
+  - type: dropdown
+    id: arch
+    attributes:
+      label: Architecture
+      options:
+        - linux/amd64
+        - linux/arm64
+        - Les deux / Both
+        - Je ne sais pas / Unsure
+
+  - type: checkboxes
+    id: verifs
+    attributes:
+      label: Vérifications préalables / Pre-flight checks
+      options:
+        - label: >-
+            Mon processus gère SIGTERM et récupère ses enfants, ou je le lance
+            avec `--init` (cette image n'a pas de système d'init).
+        - label: >-
+            Je n'attends pas que `-e PUID=…` ait un effet à l'exécution : ce
+            sont des arguments de build.
