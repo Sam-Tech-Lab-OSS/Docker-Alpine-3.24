@@ -1,0 +1,22 @@
+blank_issues_enabled: false
+
+contact_links:
+  - name: Signaler une vulnérabilité / Report a vulnerability
+    url: https://github.com/Sam-Tech-Lab-OSS/Docker-Alpine-3.24/security/advisories/new
+    about: >-
+      N'ouvrez pas d'issue publique. Utilisez le signalement privé GitHub.
+      / Do not open a public issue. Use GitHub private vulnerability reporting.
+
+  - name: Vulnérabilité sans correctif amont / CVE with no upstream fix
+    url: https://github.com/Sam-Tech-Lab-OSS/Docker-Alpine-3.24#base-image-support-status
+    about: >-
+      Les analyses incluent volontairement les CVE que Alpine n'a pas encore
+      corrigées ; c'est documenté. / Scans deliberately include CVEs Alpine
+      has not fixed yet, by design.
+
+  - name: Besoin de superviser plusieurs processus / Need multi-process supervision
+    url: https://github.com/Sam-Tech-Lab-OSS/Docker-Alpine-3.24-S6-Overlay
+    about: >-
+      Cette image n'a pas de système d'init. La variante s6-overlay de la même
+      base 3.24 couvre ce cas. / This image ships no init system; the
+      s6-overlay variant of the same 3.24 base does.
