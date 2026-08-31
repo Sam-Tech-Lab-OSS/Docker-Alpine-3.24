@@ -1,0 +1,368 @@
+name: Build & Push - multi-arch
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'Dockerfile-multi-arch'
+
+  pull_request:
+    branches: [ main ]
+  schedule:
+    - cron: "0 3 1 * *" # chaque 1er du mois à 03h00 UTC
+  workflow_dispatch:
+
+concurrency:
+  group: build-multi-arch-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  GHCR_IMAGE: ghcr.io/sam-tech-lab-oss/alpine-3.24
+  DOCKERHUB_IMAGE: samtechlab/alpine-3.24
+  AUTHORS: Sam Tech Lab
+  TITLE: Alpine 3.24 Base
+  DESCRIPTION: Image Alpine 3.24 légère, durcie et multi-architecture
+  VERSION: "3.24"
+  LICENSES: Apache-2.0
+
+jobs:
+  lint:
+    name: Lint Dockerfile
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Run hadolint
+        uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387
+        with:
+          dockerfile: Dockerfile-multi-arch
+          failure-threshold: error
+
+  test:
+    name: Test d'intégration (${{ matrix.arch }})
+    needs: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up QEMU (émulation arm64)
+        if: matrix.arch == 'arm64'
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
+
+      - name: Build de l'image de test (${{ matrix.arch }}, local)
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          file: ./Dockerfile-multi-arch
+          platforms: linux/${{ matrix.arch }}
+          push: false
+          load: true
+          tags: alpine-test:ci
+
+      - name: L'image construite est bien en ${{ matrix.arch }}
+        run: |
+          ARCH=$(docker image inspect --format '{{.Architecture}}' alpine-test:ci)
+          echo "architecture de l'image = ${ARCH}"
+          test "${ARCH}" = "${{ matrix.arch }}"
+
+      - name: Le CMD est bien PID 1 (aucun init interposé)
+        run: |
+          PID1=$(docker run --rm alpine-test:ci cat /proc/1/comm)
+          echo "PID 1 = ${PID1}"
+          test "${PID1}" = "cat"
+
+      - name: Le CMD par défaut est /bin/bash
+        run: |
+          CMD=$(docker image inspect --format '{{json .Config.Cmd}}' alpine-test:ci)
+          echo "CMD = ${CMD}"
+          test "${CMD}" = '["/bin/bash"]'
+
+      - name: Le conteneur tourne en appuser, jamais en root
+        run: |
+          OUT=$(docker run --rm alpine-test:ci id -un)
+          UID_=$(docker run --rm alpine-test:ci id -u)
+          echo "utilisateur = ${OUT} (uid ${UID_})"
+          test "${OUT}" = "appuser"
+          test "${UID_}" = "1000"
+
+      - name: HOME vaut /config et /config est inscriptible
+        run: |
+          OUT=$(docker run --rm alpine-test:ci sh -c 'echo "$HOME"')
+          echo "HOME = ${OUT}"
+          test "${OUT}" = "/config"
+          docker run --rm alpine-test:ci sh -c 'touch /config/preuve && test -f /config/preuve'
+
+      - name: /config appartient à appuser en mode 750
+        run: |
+          OUT=$(docker run --rm alpine-test:ci stat -c '%U:%G %a' /config)
+          echo "/config = ${OUT}"
+          test "${OUT}" = "appuser:appuser 750"
+
+      - name: Le code de sortie du CMD est propagé au conteneur
+        run: |
+          set +e
+          docker run --rm alpine-test:ci sh -c 'exit 42'
+          CODE=$?
+          set -e
+          echo "code de sortie = ${CODE}"
+          test "${CODE}" -eq 42
+
+      - name: Aucun binaire SUID/SGID ne subsiste
+        run: |
+          N=$(docker run --rm -u 0 alpine-test:ci \
+                find / -xdev -type f \( -perm -4000 -o -perm -2000 \) -print 2>/dev/null | wc -l)
+          echo "binaires SUID/SGID restants = ${N}"
+          test "${N}" -eq 0
+
+      - name: L'UTF-8 traverse l'image sans être mutilé
+        run: |
+          OUT=$(docker run --rm alpine-test:ci sh -c 'cd /tmp && : > "café-漢字.txt" && ls' 2>/dev/null)
+          echo "nom relu = ${OUT}"
+          test "${OUT}" = "café-漢字.txt"
+
+      - name: Le fuseau horaire par défaut est UTC
+        run: |
+          OUT=$(docker run --rm alpine-test:ci date +%Z)
+          echo "fuseau = ${OUT}"
+          test "${OUT}" = "UTC"
+
+  build-multi-arch:
+    needs: test
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up QEMU (cross-arch emulation)
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
+
+      - name: Les identifiants Docker Hub sont-ils disponibles ?
+        id: dockerhub
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [ -n "${DOCKERHUB_USERNAME}" ] && [ -n "${DOCKERHUB_TOKEN}" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            echo "Secrets Docker Hub présents : publication activée."
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Secrets Docker Hub absents, publication Docker Hub ignorée (GHCR reste actif)."
+          fi
+
+      - name: Log in to Docker Hub
+        if: steps.dockerhub.outputs.available == 'true'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Log in to GitHub Container Registry (GHCR)
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute version tag
+        id: version
+        run: |
+          TAG=$(date -u +'%Y.%m')
+          BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "build_date=${BUILD_DATE}" >> "$GITHUB_OUTPUT"
+
+      - name: Composer la liste des tags
+        id: tags
+        run: |
+          {
+            echo 'list<<TAGS_EOF'
+            echo "${GHCR_IMAGE}:latest"
+            echo "${GHCR_IMAGE}:${{ steps.version.outputs.tag }}"
+            if [ "${{ steps.dockerhub.outputs.available }}" = "true" ]; then
+              echo "${DOCKERHUB_IMAGE}:latest"
+              echo "${DOCKERHUB_IMAGE}:${{ steps.version.outputs.tag }}"
+            fi
+            echo 'TAGS_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build and push multi-arch
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          file: ./Dockerfile-multi-arch
+          platforms: linux/amd64,linux/arm64
+          push: true
+          sbom: true
+          provenance: mode=max
+          annotations: |
+            index:org.opencontainers.image.description=${{ env.DESCRIPTION }}
+            index:org.opencontainers.image.title=${{ env.TITLE }}
+            index:org.opencontainers.image.version=${{ env.VERSION }}
+            index:org.opencontainers.image.licenses=${{ env.LICENSES }}
+            index:org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          build-args: |
+            BUILD_DATE=${{ steps.version.outputs.build_date }}
+            REPO_URL=https://github.com/${{ github.repository }}
+            AUTHORS=${{ env.AUTHORS }}
+            TITLE=${{ env.TITLE }}
+            DESCRIPTION=${{ env.DESCRIPTION }}
+            VERSION=${{ env.VERSION }}
+            LICENSES=${{ env.LICENSES }}
+          tags: ${{ steps.tags.outputs.list }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.vendor=Sam Tech Lab
+            org.opencontainers.image.url=https://github.com/${{ github.repository }}
+
+      - name: Le manifeste publié couvre les deux architectures
+        run: |
+          REF_DIGEST=""
+          for IMG in $(echo "${{ steps.tags.outputs.list }}" | grep ':latest$'); do
+            RAW=$(docker buildx imagetools inspect --raw "${IMG}")
+            ARCHES=$(echo "${RAW}" | jq -r '[.manifests[].platform.architecture] | unique | join(" ")')
+            DIGEST="sha256:$(printf '%s' "${RAW}" | sha256sum | cut -d' ' -f1)"
+            echo "${IMG}"
+            echo "  architectures : ${ARCHES}"
+            echo "  digest        : ${DIGEST}"
+            for WANT in amd64 arm64; do
+              if ! echo "${ARCHES}" | tr ' ' '\n' | grep -qx "${WANT}"; then
+                echo "::error::${IMG} ne contient pas d'image ${WANT}."
+                exit 1
+              fi
+            done
+            if [ -z "${REF_DIGEST}" ]; then
+              REF_DIGEST="${DIGEST}"
+            elif [ "${DIGEST}" != "${REF_DIGEST}" ]; then
+              echo "::error::Les registres ne servent pas le même digest (${REF_DIGEST} vs ${DIGEST})."
+              exit 1
+            fi
+          done
+          echo "Tous les registres servent ${REF_DIGEST}."
+
+      - name: Installer Cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Signer les images publiées
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          cosign sign --yes "${GHCR_IMAGE}@${DIGEST}"
+          echo "Signé : ${GHCR_IMAGE}@${DIGEST}"
+          if [ "${{ steps.dockerhub.outputs.available }}" = "true" ]; then
+            cosign sign --yes "${DOCKERHUB_IMAGE}@${DIGEST}"
+            echo "Signé : ${DOCKERHUB_IMAGE}@${DIGEST}"
+          fi
+
+      - name: La signature se vérifie
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          cosign verify \
+            --certificate-identity-regexp "^https://github.com/${{ github.repository }}/\.github/workflows/" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "${GHCR_IMAGE}@${DIGEST}" > /dev/null
+          echo "Signature vérifiée sur ${GHCR_IMAGE}@${DIGEST}."
+
+      - name: Consigner la publication du mois
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.version.outputs.tag }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          BUILD_DATE: ${{ steps.version.outputs.build_date }}
+          DEPOT: ${{ github.repository }}
+          COMMIT: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+          HUB: ${{ steps.dockerhub.outputs.available }}
+        run: |
+          {
+            echo "Publication du ${BUILD_DATE}, construite depuis ${COMMIT}."
+            echo
+            echo "| Registre | Référence |"
+            echo "|---|---|"
+            echo "| GHCR | \`${GHCR_IMAGE}@${DIGEST}\` |"
+            if [ "${HUB}" = "true" ]; then
+              echo "| Docker Hub | \`${DOCKERHUB_IMAGE}@${DIGEST}\` |"
+            fi
+            echo
+            echo "Les étiquettes \`latest\` et \`${TAG}\` désignaient ce digest à la date ci-dessus."
+            echo "Elles seront réécrites ; seule la référence par digest reste stable."
+            echo
+            echo "Signature, SBOM et provenance sont attachés au manifeste dans chaque registre."
+            echo "La procédure de vérification figure dans le README."
+            echo
+            echo "[Exécution du build](https://github.com/${DEPOT}/actions/runs/${RUN_ID})"
+          } > "${RUNNER_TEMP}/corps-release.md"
+
+          CHARGE=$(jq -n --arg tag "${TAG}" --rawfile corps "${RUNNER_TEMP}/corps-release.md" \
+            '{tag_name: $tag, name: $tag, body: $corps, draft: false, prerelease: false}')
+
+          API="https://api.github.com/repos/${DEPOT}"
+          ID=$(curl -sS -H "Authorization: Bearer ${GH_TOKEN}" \
+                 "${API}/releases/tags/${TAG}" | jq -r '.id // empty')
+
+          if [ -n "${ID}" ]; then
+            echo "Release ${TAG} déjà présente : mise à jour."
+            METHODE=PATCH; CIBLE="${API}/releases/${ID}"
+          else
+            echo "Création de la release ${TAG}."
+            METHODE=POST; CIBLE="${API}/releases"
+          fi
+
+          REPONSE=$(curl -sS -X "${METHODE}" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "${CHARGE}" "${CIBLE}")
+
+          URL=$(echo "${REPONSE}" | jq -r '.html_url // empty')
+          if [ -z "${URL}" ]; then
+            echo "::error::La release n'a pas pu être écrite."
+            echo "${REPONSE}" | jq -r '.message // .' >&2
+            exit 1
+          fi
+          echo "Release : ${URL}"
+
+      - name: Les labels OCI ne portent pas de guillemets parasites
+        run: |
+          docker pull -q "${GHCR_IMAGE}:latest"
+          LABELS=$(docker image inspect --format '{{json .Config.Labels}}' "${GHCR_IMAGE}:latest")
+          echo "${LABELS}" | jq .
+          if echo "${LABELS}" | jq -e 'to_entries[] | select(.value | test("^\"|\"$"))' >/dev/null; then
+            echo "::error::Au moins un label est publié avec des guillemets littéraux ; retirez-les du bloc labels:."
+            exit 1
+          fi
+          echo "Aucun label encadré de guillemets."
