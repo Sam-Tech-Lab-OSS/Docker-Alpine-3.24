@@ -1,0 +1,43 @@
+name: Fusion automatique des mises à jour
+
+on:
+  pull_request:
+    branches: [ main ]
+
+permissions: {}
+
+jobs:
+  fusionner:
+    name: Demander la fusion automatique
+    if: github.actor == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Lire la nature de la mise à jour
+        id: nature
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+
+      - name: Demander la fusion automatique
+        if: steps.nature.outputs.update-type != 'version-update:semver-major'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          URL: ${{ github.event.pull_request.html_url }}
+        run: gh pr merge --auto --squash "${URL}"
+
+      - name: Signaler une montée de version majeure
+        if: steps.nature.outputs.update-type == 'version-update:semver-major'
+        env:
+          TITRE: ${{ github.event.pull_request.title }}
+        run: |
+          {
+            echo "## Fusion automatique non demandée"
+            echo
+            echo "Montée de version majeure : « ${TITRE} »."
+            echo
+            echo "La fusion reste à décider à la main."
+          } >> "${GITHUB_STEP_SUMMARY}"
