@@ -1,0 +1,159 @@
+# ------------------------------------------------ #
+# Étape 1 — Build du rootfs Alpine 3.24            #
+# ------------------------------------------------ #
+
+FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b AS builder
+
+# Arguments Buildx (auto fournis : TARGETARCH, TARGETPLATFORM)
+ARG TARGETARCH
+ARG TARGETPLATFORM
+
+# Variables globales
+ENV REL=v3.24
+ENV ARCH=${TARGETARCH}
+ENV MIROIR=https://dl-cdn.alpinelinux.org/alpine
+
+# Installer les outils nécessaires
+# hadolint ignore=DL3018
+RUN apk add --no-cache curl tar xz
+
+# Construire le rootfs Alpine.
+# hadolint ignore=DL3018
+RUN echo "**** Build rootfs Alpine (${REL}) pour ${ARCH} ****" && \
+    case "${ARCH}" in \
+        amd64) APK_ARCH=x86_64  ;; \
+        arm64) APK_ARCH=aarch64 ;; \
+        *) echo "Architecture non prise en charge : ${ARCH}" >&2; exit 1 ;; \
+    esac && \
+    mkdir -p /rootfs/etc/apk && \
+    printf '%s/%s/main\n%s/%s/community\n' \
+        "${MIROIR}" "${REL}" "${MIROIR}" "${REL}" > /rootfs/etc/apk/repositories && \
+    apk --root /rootfs --keys-dir /etc/apk/keys --arch "${APK_ARCH}" \
+        --initdb --no-cache add \
+        alpine-baselayout \
+        alpine-keys \
+        apk-tools \
+        busybox \
+        libc-utils && \
+    sed -i 's/^root::/root:!:/' /rootfs/etc/shadow && \
+    grep -q '^root:!' /rootfs/etc/shadow && \
+    rm -rf /rootfs/var/log/* /rootfs/var/cache/apk/* /rootfs/root/.ash_history
+
+# -------------------------------------- #
+# Étape 2 — Image finale Alpine minimale #
+# -------------------------------------- #
+
+FROM scratch
+
+ARG TARGETARCH
+ARG BUILD_DATE
+ARG REPO_URL=https://github.com/Sam-Tech-Lab-OSS/Docker-Alpine-3.24
+ARG AUTHORS="Sam Tech Lab"
+ARG TITLE="Alpine 3.24 Base"
+ARG DESCRIPTION="Image Alpine 3.24 légère, durcie et multi-architecture"
+ARG VERSION="3.24"
+ARG LICENSES="Apache-2.0"
+
+# Copier le rootfs préparé
+
+COPY --from=builder /rootfs/ /
+
+# -------------------------- #
+# Labels conformes OCI       #
+# -------------------------- #
+
+LABEL maintainer="$AUTHORS" \
+      org.opencontainers.image.title="$TITLE" \
+      org.opencontainers.image.description="$DESCRIPTION" \
+      org.opencontainers.image.version="$VERSION" \
+      org.opencontainers.image.architecture=$TARGETARCH \
+      org.opencontainers.image.authors="$AUTHORS" \
+      org.opencontainers.image.licenses="$LICENSES" \
+      org.opencontainers.image.source=$REPO_URL \
+      org.opencontainers.image.created=$BUILD_DATE
+
+# --------------------------- #
+# Environnement global        #
+# --------------------------- #
+
+ENV LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    TERM=xterm \
+    TZ=UTC \
+    PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+# ------------------ #
+# Paquets essentiels #
+# ------------------ #
+# hadolint ignore=DL3018
+RUN set -eux && \
+    echo "**** Installation des paquets de base ****" && \
+    apk upgrade --no-cache && \
+    apk add --no-cache \
+        alpine-release \
+        bash \
+        ca-certificates \
+        coreutils \
+        curl \
+        findutils \
+        jq \
+        netcat-openbsd \
+        shadow \
+        tzdata && \
+    update-ca-certificates
+
+# -------------------------------------------------- #
+# Sécurité & utilisateur non-root (production-grade) #
+# -------------------------------------------------- #
+
+ENV PUID=1000 \
+    PGID=1000 \
+    HOME=/config
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+RUN set -eux && \
+    echo "**** Création utilisateur sécurisé ****" && \
+    NOLOGIN="$(command -v nologin || echo /sbin/nologin)" && \
+    if [ ! -x "${NOLOGIN}" ]; then echo "nologin introuvable : ${NOLOGIN}"; exit 1; fi && \
+    if ! command -v getent >/dev/null; then echo "getent introuvable : la garde UID/GID serait inopérante"; exit 1; fi && \
+    if getent passwd "${PUID}" >/dev/null; then \
+        CONFLIT="$(getent passwd "${PUID}" | cut -d: -f1)"; \
+        echo "**** UID ${PUID} occupé par ${CONFLIT} — suppression ****"; \
+        userdel -r "${CONFLIT}" >/dev/null 2>&1 || true; \
+        if getent passwd "${PUID}" >/dev/null; then echo "UID ${PUID} toujours occupé"; exit 1; fi; \
+    fi && \
+    if getent group "${PGID}" >/dev/null; then \
+        CONFLIT="$(getent group "${PGID}" | cut -d: -f1)"; \
+        echo "**** GID ${PGID} occupé par ${CONFLIT} — suppression ****"; \
+        groupdel "${CONFLIT}" >/dev/null 2>&1 || true; \
+        if getent group "${PGID}" >/dev/null; then echo "GID ${PGID} toujours occupé"; exit 1; fi; \
+    fi && \
+    groupadd -g ${PGID} appuser && \
+    useradd -l -u ${PUID} -g ${PGID} -d /config -s "${NOLOGIN}" appuser && \
+    mkdir -p /config && chown -R appuser:appuser /config && chmod 750 /config && \
+    echo 'umask 027' >> /etc/profile && \
+    { find / -xdev -type f \( -perm -4000 -o -perm -2000 \) -exec chmod a-s {} + 2>/dev/null || true; } && \
+    { find / -xdev -type f -perm /0002 -exec chmod o-w {} + 2>/dev/null || true; } && \
+    chmod 700 /root && \
+    id appuser && \
+    echo "**** User appuser ready (UID=${PUID}, GID=${PGID}) ****"
+
+# --------------- #
+# Nettoyage final #
+# --------------- #
+
+RUN set -eux && \
+    echo "**** Nettoyage du système ****" && \
+    rm -rf /tmp/* /var/tmp/* /var/log/* /var/cache/apk/*
+
+# hadolint ignore=DL3066
+USER appuser
+
+# Définir le shell par défaut
+
+SHELL ["/bin/bash", "-c"]
+
+# Commande par défaut
+
+CMD ["/bin/bash"]
