@@ -88,8 +88,6 @@ jobs:
             | jq -r '.full_description // ""' | wc -c)
           LOCAL=$(wc -c < README-dockerhub.md)
           echo "publiée : ${EN_LIGNE} octets | fichier : ${LOCAL} octets"
-          # `jq -r` ajoute un saut de ligne final que wc compte : on tolère
-          # un octet d'écart plutôt que de comparer des chaînes entières.
           DIFF=$(( EN_LIGNE > LOCAL ? EN_LIGNE - LOCAL : LOCAL - EN_LIGNE ))
           if [ "${DIFF}" -gt 1 ]; then
             echo "::error::La description en ligne ne correspond pas au fichier (écart de ${DIFF} octets)."

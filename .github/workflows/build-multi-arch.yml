@@ -9,7 +9,7 @@ on:
   pull_request:
     branches: [ main ]
   schedule:
-    - cron: "0 3 1 * *" # chaque 1er du mois à 03h00 UTC
+    - cron: "45 1 1 * *" # chaque 1er du mois à 01h45 UTC
   workflow_dispatch:
 
 concurrency:
