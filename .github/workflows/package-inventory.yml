@@ -1,0 +1,148 @@
+name: Inventaire des paquets
+
+on:
+  workflow_run:
+    workflows:
+      - "Build & Push - multi-arch"
+    types:
+      - completed
+  workflow_dispatch:
+
+concurrency:
+  group: inventaire-paquets
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/sam-tech-lab-oss/alpine-3.24
+
+jobs:
+  inventorier:
+    if: ${{ github.event_name != 'workflow_run' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event != 'pull_request' && github.event.workflow_run.head_branch == 'main') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Générer un jeton d'application
+        id: jeton
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: main
+          token: ${{ steps.jeton.outputs.token }}
+
+      - name: Relever l'inventaire sur l'image publiée
+        id: releve
+        run: |
+          set -euo pipefail
+
+          docker pull -q "${IMAGE}:latest"
+
+          DIGEST=$(docker image inspect --format '{{index .RepoDigests 0}}' "${IMAGE}:latest" | cut -d@ -f2)
+          VERSION=$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}}' "${IMAGE}:latest")
+          CREE=$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.created"}}' "${IMAGE}:latest")
+
+          docker run --rm "${IMAGE}@${DIGEST}" apk info -v \
+            | sed -E 's/-([^-]+-r[0-9]+)$/\t\1/' \
+            | LC_ALL=C sort > "${RUNNER_TEMP}/paquets.tsv"
+
+          NOMBRE=$(wc -l < "${RUNNER_TEMP}/paquets.tsv")
+          echo "paquets relevés : ${NOMBRE}"
+
+          test "${NOMBRE}" -gt 0
+
+          if ! awk -F'\t' 'NF != 2 { exit 1 }' "${RUNNER_TEMP}/paquets.tsv"; then
+            echo "::error::Au moins une ligne de l'inventaire n'a pas pu être découpée en nom + version."
+            awk -F'\t' 'NF != 2' "${RUNNER_TEMP}/paquets.tsv" >&2
+            exit 1
+          fi
+
+          {
+            echo "digest=${DIGEST}"
+            echo "version=${VERSION}"
+            echo "cree=${CREE}"
+            echo "nombre=${NOMBRE}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Publier PACKAGES.md
+        env:
+          GH_TOKEN: ${{ steps.jeton.outputs.token }}
+          APP_SLUG: ${{ steps.jeton.outputs.app-slug }}
+          DIGEST: ${{ steps.releve.outputs.digest }}
+          VERSION: ${{ steps.releve.outputs.version }}
+          CREE: ${{ steps.releve.outputs.cree }}
+          NOMBRE: ${{ steps.releve.outputs.nombre }}
+        run: |
+          set -euo pipefail
+
+          {
+            echo "# Installed packages / Paquets installés"
+            echo
+            echo "Generated automatically after each publication. Do not edit by"
+            echo "hand: it is overwritten by the next run."
+            echo
+            echo "*Fichier généré automatiquement après chaque publication. Ne le"
+            echo "modifiez pas à la main : il est réécrit au relevé suivant.*"
+            echo
+            echo "- **Image** : \`${IMAGE}\`"
+            echo "- **Version** : \`${VERSION}\`"
+            echo "- **Digest** : \`${DIGEST}\`"
+            echo "- **Built / Construite le** : ${CREE}"
+            echo "- **Architecture surveyed / Architecture relevée** : \`linux/amd64\`"
+            echo "- **Packages / Paquets** : ${NOMBRE}"
+            echo
+            echo "Both published architectures share the same package versions;"
+            echo "only the binaries differ."
+            echo
+            echo "*Les deux architectures publiées partagent les mêmes versions de"
+            echo "paquets ; seuls les binaires diffèrent.*"
+            echo
+            echo "| Package / Paquet | Version |"
+            echo "| --- | --- |"
+            awk -F'\t' '{ printf "| %s | `%s` |\n", $1, $2 }' "${RUNNER_TEMP}/paquets.tsv"
+          } > PACKAGES.md
+
+          if [ -z "$(git status --porcelain -- PACKAGES.md)" ]; then
+            echo "Inventaire inchangé depuis le dernier relevé : rien à commiter."
+            exit 0
+          fi
+
+          AUTEUR="${APP_SLUG}[bot]"
+          ID=$(gh api "/users/${AUTEUR}" --jq .id)
+          git config user.name "${AUTEUR}"
+          git config user.email "${ID}+${AUTEUR}@users.noreply.github.com"
+
+          git add PACKAGES.md
+          git commit -m "Mettre à jour l'inventaire des paquets (${VERSION}, ${NOMBRE} paquets)"
+
+          for essai in 1 2 3; do
+            git fetch --quiet origin main
+            if ! git rebase --quiet FETCH_HEAD; then
+              git rebase --abort
+              echo "::error::Rebase impossible sur main."
+              exit 1
+            fi
+
+            if git push origin HEAD:refs/heads/main 2>&1 | tee "${RUNNER_TEMP}/poussee.log"; then
+              echo "PACKAGES.md publié sur main (${NOMBRE} paquets)."
+              exit 0
+            fi
+
+            if grep -qE 'GH006|protected branch' "${RUNNER_TEMP}/poussee.log"; then
+              echo "::error::main est protégée et l'application ${APP_SLUG} n'est pas dans la liste de dérogation du ruleset. Settings → Rules → Rulesets → Bypass list → Add bypass → onglet Apps."
+              exit 1
+            fi
+
+            echo "Poussée refusée (essai ${essai}/3)."
+            sleep $(( essai * 5 ))
+          done
+
+          echo "::error::PACKAGES.md n'a pas pu être poussé sur main."
+          exit 1

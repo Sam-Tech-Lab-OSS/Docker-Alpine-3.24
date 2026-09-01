@@ -1,3 +1,24 @@
+Container base images — Sam Tech Lab
+Copyright 2026 Sam Tech Lab
+
+This product includes software developed by Sam Tech Lab
+(https://github.com/Sam-Tech-Lab-OSS).
+
+The LICENSE file covers Sam Tech Lab's contribution: the Dockerfile,
+the continuous integration workflows, the init scripts and the
+documentation.
+
+Images published from this repository bundle third-party software that
+this file does not cover and that remains subject to its own licences:
+
+  - the Alpine base system, whose packages remain subject to the licences
+    of their respective authors.
+
+Under section 4 of the Apache License 2.0, this file must accompany any
+redistribution of the work or of a derivative work.
+
+--------------------------------------------------------------------------
+
 Images de base conteneur — Sam Tech Lab
 Copyright 2026 Sam Tech Lab
 
